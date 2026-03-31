@@ -39,12 +39,12 @@ else:
 VECTOR_STORE_PROVIDER = os.environ.get("VECTOR_STORE_PROVIDER", "qdrant")
 
 # pgvector config
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+# POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
+# POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
+# POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
+# POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
+# POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
+# POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 
 # Qdrant config
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "qdrant")
@@ -53,21 +53,23 @@ QDRANT_COLLECTION_NAME = os.environ.get("QDRANT_COLLECTION_NAME", "mem0")
 
 # Graph store config
 ENABLE_GRAPH = os.environ.get("ENABLE_GRAPH", "false").lower() in ("true", "1", "yes")
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
-NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "mem0graph")
+# NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+# NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
+# NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "mem0graph")
 
-MEMGRAPH_URI = os.environ.get("MEMGRAPH_URI", "bolt://localhost:7687")
-MEMGRAPH_USERNAME = os.environ.get("MEMGRAPH_USERNAME", "memgraph")
-MEMGRAPH_PASSWORD = os.environ.get("MEMGRAPH_PASSWORD", "mem0graph")
+# MEMGRAPH_URI = os.environ.get("MEMGRAPH_URI", "bolt://localhost:7687")
+# MEMGRAPH_USERNAME = os.environ.get("MEMGRAPH_USERNAME", "memgraph")
+# MEMGRAPH_PASSWORD = os.environ.get("MEMGRAPH_PASSWORD", "mem0graph")
 
 # LLM config
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-EMBEDDER_URL = os.environ.get("EMBEDDER_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-EMBEDDER_API_KEY = os.environ.get("EMBEDDER_API_KEY")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4.1-nano-2025-04-14")
+
+EMBEDDER_URL = os.environ.get("EMBEDDER_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+EMBEDDER_PROVIDER = os.environ.get("EMBEDDER_PROVIDER")
+EMBEDDER_API_KEY = os.environ.get("EMBEDDER_API_KEY")
 EMBEDDER_MODEL = os.environ.get("EMBEDDER_MODEL", "text-embedding-3-small")
 EMBEDDER_DIMS = os.environ.get("EMBEDDER_DIMS", 1536)
 
@@ -84,18 +86,18 @@ if VECTOR_STORE_PROVIDER == "qdrant":
             "collection_name": QDRANT_COLLECTION_NAME,
         },
     }
-else:
-    _vector_store_config = {
-        "provider": "pgvector",
-        "config": {
-            "host": POSTGRES_HOST,
-            "port": int(POSTGRES_PORT),
-            "dbname": POSTGRES_DB,
-            "user": POSTGRES_USER,
-            "password": POSTGRES_PASSWORD,
-            "collection_name": POSTGRES_COLLECTION_NAME,
-        },
-    }
+# else:
+#    _vector_store_config = {
+#        "provider": "pgvector",
+#        "config": {
+#            "host": POSTGRES_HOST,
+#            "port": int(POSTGRES_PORT),
+#            "dbname": POSTGRES_DB,
+#            "user": POSTGRES_USER,
+#            "password": POSTGRES_PASSWORD,
+#            "collection_name": POSTGRES_COLLECTION_NAME,
+#        },
+#    }
 
 DEFAULT_CONFIG = {
     "version": "v1.1",
@@ -110,7 +112,7 @@ DEFAULT_CONFIG = {
         },
     },
     "embedder": {
-        "provider": LLM_PROVIDER,
+        "provider": EMBEDDER_PROVIDER or LLM_PROVIDER,
         "config": {
             "api_key": EMBEDDER_API_KEY,
             "model": EMBEDDER_MODEL,
