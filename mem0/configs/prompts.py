@@ -402,6 +402,27 @@ You are a memory summarization system that records and preserves the complete in
 """
 
 
+PROFILE_EXTRACTION_PROMPT = """You are a user profile extraction system. Given a conversation and a profile schema, extract structured attribute values from the conversation.
+
+Profile Schema Attributes:
+{schema_attributes}
+
+Existing profile values (for context and conflict resolution):
+{existing_profile}
+
+Instructions:
+- For each attribute in the schema, try to extract the value from the USER's messages only.
+- Only extract information that is explicitly stated or can be directly inferred from the user's messages.
+- If an attribute cannot be determined from the conversation, return null for that attribute.
+- If you find a new value for an attribute that already has an existing value, determine whether to keep the existing value or update it. Prefer newer, more specific information.
+- Detect the language of the user's messages and record values in the same language.
+- Return ONLY a JSON object, no other text.
+
+Return format:
+{{"profile": {{"attribute_name": "extracted_value_or_null", ...}}}}
+"""
+
+
 def get_update_memory_messages(retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None):
     if custom_update_memory_prompt is None:
         global DEFAULT_UPDATE_MEMORY_PROMPT
