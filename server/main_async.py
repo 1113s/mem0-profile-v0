@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import secrets
@@ -11,6 +12,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from mem0 import AsyncMemory
+from mem0.memory.profile_manager import ProfileManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -130,20 +132,27 @@ if ENABLE_GRAPH:
     }
 
 
-# Global memory instance, initialized asynchronously in lifespan
+# Global instances, initialized in lifespan
 MEMORY_INSTANCE: Optional[AsyncMemory] = None
+PROFILE_MANAGER: Optional[ProfileManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize AsyncMemory on startup, cleanup on shutdown."""
-    global MEMORY_INSTANCE
+    """Initialize AsyncMemory and ProfileManager on startup, cleanup on shutdown."""
+    global MEMORY_INSTANCE, PROFILE_MANAGER
     MEMORY_INSTANCE = await AsyncMemory.from_config(DEFAULT_CONFIG)
-    logging.info("AsyncMemory instance initialized successfully.")
+    PROFILE_MANAGER = ProfileManager(
+        db_path=HISTORY_DB_PATH,
+        llm_config=DEFAULT_CONFIG["llm"],
+    )
+    logging.info("AsyncMemory and ProfileManager initialized successfully.")
     yield
-    # Cleanup on shutdown (if needed)
     MEMORY_INSTANCE = None
-    logging.info("AsyncMemory instance released.")
+    if PROFILE_MANAGER:
+        PROFILE_MANAGER.close()
+        PROFILE_MANAGER = None
+    logging.info("AsyncMemory and ProfileManager released.")
 
 
 app = FastAPI(
@@ -193,6 +202,7 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    profile_schema_id: Optional[str] = Field(None, description="Profile schema ID for structured attribute extraction.")
 
 
 class SearchRequest(BaseModel):
@@ -205,6 +215,28 @@ class SearchRequest(BaseModel):
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
 
 
+# --- Profile Schema Models ---
+
+class ProfileAttributeCreate(BaseModel):
+    name: str = Field(..., description="Attribute name (e.g. 'age', 'occupation').")
+    description: str = Field(..., description="Attribute description to guide extraction.")
+    default_value: Optional[str] = Field(None, description="Initial default value.")
+
+
+class ProfileSchemaCreate(BaseModel):
+    name: str = Field(..., description="Unique schema name.")
+    description: Optional[str] = Field(None, description="Schema description.")
+    attributes: List[ProfileAttributeCreate] = Field(..., description="List of attributes to extract.")
+
+
+class ProfileSchemaUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="New schema name.")
+    description: Optional[str] = Field(None, description="New schema description.")
+    add_attributes: Optional[List[ProfileAttributeCreate]] = Field(None, description="Attributes to add.")
+    update_attributes: Optional[List[ProfileAttributeCreate]] = Field(None, description="Attributes to update.")
+    delete_attribute_names: Optional[List[str]] = Field(None, description="Attribute names to delete.")
+
+
 @app.post("/configure", summary="Configure Mem0")
 async def set_config(config: Dict[str, Any], _api_key: Optional[str] = Depends(verify_api_key)):
     """Set memory configuration."""
@@ -215,16 +247,38 @@ async def set_config(config: Dict[str, Any], _api_key: Optional[str] = Depends(v
 
 @app.post("/memories", summary="Create memories")
 async def add_memory(memory_create: MemoryCreate, _api_key: Optional[str] = Depends(verify_api_key)):
-    """Store new memories."""
+    """Store new memories. Optionally extract user profile in parallel."""
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
-    params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    # Build memory params (exclude profile_schema_id which is handled separately)
+    params = {
+        k: v for k, v in memory_create.model_dump().items()
+        if v is not None and k not in ("messages", "profile_schema_id")
+    }
     try:
-        response = await MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
-        return JSONResponse(content=response)
+        messages = [m.model_dump() for m in memory_create.messages]
+        memory_coro = MEMORY_INSTANCE.add(messages=messages, **params)
+
+        # Run profile extraction in parallel if requested
+        profile_task = None
+        if memory_create.profile_schema_id and memory_create.user_id:
+            profile_task = asyncio.to_thread(
+                PROFILE_MANAGER.extract,
+                messages,
+                memory_create.user_id,
+                memory_create.profile_schema_id,
+            )
+
+        if profile_task:
+            mem_result, prof_result = await asyncio.gather(memory_coro, profile_task)
+            mem_result["profile"] = prof_result
+        else:
+            mem_result = await memory_coro
+
+        return JSONResponse(content=mem_result)
     except Exception as e:
-        logging.exception("Error in add_memory:")  # This will log the full traceback
+        logging.exception("Error in add_memory:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -337,6 +391,141 @@ async def reset_memory(_api_key: Optional[str] = Depends(verify_api_key)):
         return {"message": "All memories reset"}
     except Exception as e:
         logging.exception("Error in reset_memory:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----------------------------------------------------------------
+# Profile Schema Endpoints
+# ----------------------------------------------------------------
+
+
+@app.post("/profile_schemas", summary="Create a profile schema")
+async def create_profile_schema(
+    schema_create: ProfileSchemaCreate,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Create a new profile schema (template) for structured attribute extraction."""
+    try:
+        result = await asyncio.to_thread(
+            PROFILE_MANAGER.create_schema,
+            name=schema_create.name,
+            description=schema_create.description,
+            attributes=[attr.model_dump() for attr in schema_create.attributes],
+        )
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.exception("Error in create_profile_schema:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/profile_schemas", summary="List profile schemas")
+async def list_profile_schemas(
+    limit: int = 100,
+    offset: int = 0,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """List all profile schemas."""
+    try:
+        result = await asyncio.to_thread(PROFILE_MANAGER.list_schemas, limit=limit, offset=offset)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logging.exception("Error in list_profile_schemas:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/profile_schemas/{schema_id}", summary="Get a profile schema")
+async def get_profile_schema(
+    schema_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Get a specific profile schema by ID."""
+    try:
+        result = await asyncio.to_thread(PROFILE_MANAGER.get_schema, schema_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Profile schema not found.")
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Error in get_profile_schema:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/profile_schemas/{schema_id}", summary="Update a profile schema")
+async def update_profile_schema(
+    schema_id: str,
+    schema_update: ProfileSchemaUpdate,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Update a profile schema (add/update/delete attributes, rename, etc.)."""
+    try:
+        result = await asyncio.to_thread(
+            PROFILE_MANAGER.update_schema,
+            schema_id,
+            name=schema_update.name,
+            description=schema_update.description,
+            add_attributes=[a.model_dump() for a in schema_update.add_attributes] if schema_update.add_attributes else None,
+            update_attributes=[a.model_dump() for a in schema_update.update_attributes] if schema_update.update_attributes else None,
+            delete_attribute_names=schema_update.delete_attribute_names,
+        )
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.exception("Error in update_profile_schema:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/profile_schemas/{schema_id}", summary="Delete a profile schema")
+async def delete_profile_schema(
+    schema_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Delete a profile schema and all associated profile data."""
+    try:
+        await asyncio.to_thread(PROFILE_MANAGER.delete_schema, schema_id)
+        return {"message": "Profile schema deleted successfully"}
+    except Exception as e:
+        logging.exception("Error in delete_profile_schema:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----------------------------------------------------------------
+# User Profile Endpoints
+# ----------------------------------------------------------------
+
+
+@app.get("/profiles/{schema_id}/users/{user_id}", summary="Get user profile")
+async def get_user_profile(
+    schema_id: str,
+    user_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Get a user's extracted profile for a given schema."""
+    try:
+        result = await asyncio.to_thread(PROFILE_MANAGER.get_user_profile, schema_id, user_id)
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logging.exception("Error in get_user_profile:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/profiles/{schema_id}/users/{user_id}", summary="Delete user profile")
+async def delete_user_profile(
+    schema_id: str,
+    user_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Delete a user's profile data for a given schema."""
+    try:
+        await asyncio.to_thread(PROFILE_MANAGER.delete_user_profile, schema_id, user_id)
+        return {"message": "User profile deleted successfully"}
+    except Exception as e:
+        logging.exception("Error in delete_user_profile:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
