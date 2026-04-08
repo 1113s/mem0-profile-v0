@@ -25,7 +25,7 @@ services:
     environment:
       - PYTHONDONTWRITEBYTECODE=1  # Prevents Python from writing .pyc files
       - PYTHONUNBUFFERED=1  # Ensures Python output is sent straight to terminal
-      - MEM0_TELEMETRY=false
+      - MEM0_TELEMETRY=False
 #  postgres:
 #      image: ankane/pgvector:v0.5.1
 #      restart: on-failure
