@@ -55,7 +55,7 @@ QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
 QDRANT_COLLECTION_NAME = os.environ.get("QDRANT_COLLECTION_NAME", "mem0")
 
 # Graph store config
-ENABLE_GRAPH = os.environ.get("ENABLE_GRAPH", "false").lower() in ("true", "1", "yes")
+# ENABLE_GRAPH = os.environ.get("ENABLE_GRAPH", "false").lower() in ("true", "1", "yes")
 # NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
 # NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
 # NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "mem0graph")
@@ -126,11 +126,11 @@ DEFAULT_CONFIG = {
     "history_db_path": HISTORY_DB_PATH,
 }
 
-if ENABLE_GRAPH:
-    DEFAULT_CONFIG["graph_store"] = {
-        "provider": "neo4j",
-        "config": {"url": NEO4J_URI, "username": NEO4J_USERNAME, "password": NEO4J_PASSWORD},
-    }
+#if ENABLE_GRAPH:
+#    DEFAULT_CONFIG["graph_store"] = {
+#        "provider": "neo4j",
+#        "config": {"url": NEO4J_URI, "username": NEO4J_USERNAME, "password": NEO4J_PASSWORD},
+#    }
 
 
 # Global instances, initialized in lifespan
