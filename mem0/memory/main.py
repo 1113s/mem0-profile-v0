@@ -304,6 +304,23 @@ class Memory(MemoryBase):
             )
         capture_event("mem0.init", self, {"sync_type": "sync"})
 
+    def close(self):
+        """Release resources held by this Memory instance (SQLite connections, etc.).
+
+        The global telemetry singleton is intentionally *not* shut down here
+        because it is shared across all Memory instances in the process.  It is
+        cleaned up automatically at process exit via an ``atexit`` handler.
+        """
+        if hasattr(self, "db") and self.db is not None:
+            self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
         try:
@@ -1371,6 +1388,12 @@ class Memory(MemoryBase):
             )
         capture_event("mem0.reset", self, {"sync_type": "sync"})
 
+        if self.enable_graph:
+            try:
+                self.graph.reset()
+            except Exception:
+                logger.warning("Failed to reset graph store, continuing with reset")
+
     def chat(self, query):
         raise NotImplementedError("Chat function not implemented yet.")
 
@@ -1419,8 +1442,20 @@ class AsyncMemory(MemoryBase):
             self._telemetry_vector_store = VectorStoreFactory.create(self.config.vector_store.provider, telemetry_config)
         capture_event("mem0.init", self, {"sync_type": "async"})
 
+    def close(self):
+        """Release resources held by this AsyncMemory instance."""
+        if hasattr(self, "db") and self.db is not None:
+            self.db.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     @classmethod
-    async def from_config(cls, config_dict: Dict[str, Any]):
+    def from_config(cls, config_dict: Dict[str, Any]):
         try:
             config = cls._process_config(config_dict)
             config = MemoryConfig(**config_dict)
@@ -2526,6 +2561,12 @@ class AsyncMemory(MemoryBase):
             self.config.vector_store.provider, self.config.vector_store.config
         )
         capture_event("mem0.reset", self, {"sync_type": "async"})
+
+        if self.enable_graph:
+            try:
+                await asyncio.to_thread(self.graph.reset)
+            except Exception:
+                logger.warning("Failed to reset graph store, continuing with reset")
 
     async def chat(self, query):
         raise NotImplementedError("Chat function not implemented yet.")

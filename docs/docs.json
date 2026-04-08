@@ -4,9 +4,9 @@
   "description": "Mem0 is a self-improving memory layer for LLM applications, enabling personalized AI experiences that save costs and delight users.",
   "theme": "aspen",
   "colors": {
-    "primary": "#9C58FA",
-    "light": "#9C58FA",
-    "dark": "#9C58FA"
+    "primary": "#8F74E0",
+    "light": "#8F74E0",
+    "dark": "#8F74E0"
   },
   "favicon": "/logo/favicon.png",
   "logo": {
@@ -132,6 +132,26 @@
                     "icon": "clipboard-list",
                     "pages": [
                       "platform/contribute"
+                    ]
+                  },
+                  {
+                    "group": "Release Notes",
+                    "icon": "rocket",
+                    "pages": [
+                      "changelog"
+                    ]
+                  }
+                ]
+              },
+              {
+                "tab": "OpenClaw",
+                "groups": [
+                  {
+                    "group": "Agent Harness",
+                    "icon": "robot",
+                    "pages": [
+                      "integrations/openclaw",
+                      "integrations/hermes"
                     ]
                   }
                 ]
@@ -393,7 +413,6 @@
                       "integrations/autogen",
                       "integrations/agno",
                       "integrations/camel-ai",
-                      "integrations/openclaw",
                       "integrations/openai-agents-sdk",
                       "integrations/google-ai-adk",
                       "integrations/mastra",
@@ -426,6 +445,28 @@
                       "integrations/agentops",
                       "integrations/keywords",
                       "integrations/raycast"
+                    ]
+                  }
+                ]
+              },
+              {
+                "tab": "Agent Plugins",
+                "groups": [
+                  {
+                    "group": "Coding Agents",
+                    "icon": "terminal",
+                    "pages": [
+                      "integrations/claude-code",
+                      "integrations/cursor",
+                      "integrations/codex"
+                    ]
+                  },
+                  {
+                    "group": "Agent Harness",
+                    "icon": "robot",
+                    "pages": [
+                      "integrations/openclaw",
+                      "integrations/hermes"
                     ]
                   }
                 ]
@@ -514,18 +555,6 @@
                       "api-reference/webhook/get-webhook",
                       "api-reference/webhook/update-webhook",
                       "api-reference/webhook/delete-webhook"
-                    ]
-                  }
-                ]
-              },
-              {
-                "tab": "Release Notes",
-                "groups": [
-                  {
-                    "group": "Changelog",
-                    "icon": "rocket",
-                    "pages": [
-                      "changelog"
                     ]
                   }
                 ]
