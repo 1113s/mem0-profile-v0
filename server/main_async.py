@@ -12,6 +12,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from mem0 import AsyncMemory
+from mem0.memory.category_manager import CategoryManager
 from mem0.memory.profile_manager import ProfileManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -135,24 +136,32 @@ if ENABLE_GRAPH:
 # Global instances, initialized in lifespan
 MEMORY_INSTANCE: Optional[AsyncMemory] = None
 PROFILE_MANAGER: Optional[ProfileManager] = None
+CATEGORY_MANAGER: Optional[CategoryManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize AsyncMemory and ProfileManager on startup, cleanup on shutdown."""
-    global MEMORY_INSTANCE, PROFILE_MANAGER
+    """Initialize AsyncMemory, ProfileManager and CategoryManager on startup, cleanup on shutdown."""
+    global MEMORY_INSTANCE, PROFILE_MANAGER, CATEGORY_MANAGER
     MEMORY_INSTANCE = await AsyncMemory.from_config(DEFAULT_CONFIG)
     PROFILE_MANAGER = ProfileManager(
         db_path=HISTORY_DB_PATH,
         llm_config=DEFAULT_CONFIG["llm"],
     )
-    logging.info("AsyncMemory and ProfileManager initialized successfully.")
+    CATEGORY_MANAGER = CategoryManager(
+        db_path=HISTORY_DB_PATH,
+        llm_config=DEFAULT_CONFIG["llm"],
+    )
+    logging.info("AsyncMemory, ProfileManager and CategoryManager initialized successfully.")
     yield
     MEMORY_INSTANCE = None
     if PROFILE_MANAGER:
         PROFILE_MANAGER.close()
         PROFILE_MANAGER = None
-    logging.info("AsyncMemory and ProfileManager released.")
+    if CATEGORY_MANAGER:
+        CATEGORY_MANAGER.close()
+        CATEGORY_MANAGER = None
+    logging.info("AsyncMemory, ProfileManager and CategoryManager released.")
 
 
 app = FastAPI(
@@ -203,6 +212,7 @@ class MemoryCreate(BaseModel):
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
     profile_schema_id: Optional[str] = Field(None, description="Profile schema ID for structured attribute extraction.")
+    categorize: Optional[bool] = Field(True, description="Whether to auto-categorize memories.")
 
 
 class SearchRequest(BaseModel):
@@ -213,6 +223,7 @@ class SearchRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     limit: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
+    categories: Optional[List[str]] = Field(None, description="Filter by category names (OR semantics).")
 
 
 # --- Profile Schema Models ---
@@ -247,20 +258,19 @@ async def set_config(config: Dict[str, Any], _api_key: Optional[str] = Depends(v
 
 @app.post("/memories", summary="Create memories")
 async def add_memory(memory_create: MemoryCreate, _api_key: Optional[str] = Depends(verify_api_key)):
-    """Store new memories. Optionally extract user profile in parallel."""
+    """Store new memories. Optionally extract user profile and auto-categorize in parallel."""
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
-    # Build memory params (exclude profile_schema_id which is handled separately)
+    # Build memory params (exclude fields handled separately)
     params = {
         k: v for k, v in memory_create.model_dump().items()
-        if v is not None and k not in ("messages", "profile_schema_id")
+        if v is not None and k not in ("messages", "profile_schema_id", "categorize")
     }
     try:
         messages = [m.model_dump() for m in memory_create.messages]
-        memory_coro = MEMORY_INSTANCE.add(messages=messages, **params)
 
-        # Run profile extraction in parallel if requested
+        # Run profile extraction in parallel with memory add if requested
         profile_task = None
         if memory_create.profile_schema_id and memory_create.user_id:
             profile_task = asyncio.to_thread(
@@ -270,11 +280,20 @@ async def add_memory(memory_create: MemoryCreate, _api_key: Optional[str] = Depe
                 memory_create.profile_schema_id,
             )
 
+        memory_coro = MEMORY_INSTANCE.add(messages=messages, **params)
+
         if profile_task:
             mem_result, prof_result = await asyncio.gather(memory_coro, profile_task)
             mem_result["profile"] = prof_result
         else:
             mem_result = await memory_coro
+
+        # Auto-categorize after add (needs memory IDs from results)
+        if memory_create.categorize and mem_result.get("results"):
+            cat_result = await asyncio.to_thread(
+                CATEGORY_MANAGER.categorize, mem_result["results"]
+            )
+            mem_result["categories"] = cat_result
 
         return JSONResponse(content=mem_result)
     except Exception as e:
@@ -314,10 +333,28 @@ async def get_memory(memory_id: str, _api_key: Optional[str] = Depends(verify_ap
 
 @app.post("/search", summary="Search memories")
 async def search_memories(search_req: SearchRequest, _api_key: Optional[str] = Depends(verify_api_key)):
-    """Search for memories based on a query."""
+    """Search for memories based on a query. Optionally filter by categories."""
     try:
-        params = {k: v for k, v in search_req.model_dump().items() if v is not None and k != "query"}
-        return await MEMORY_INSTANCE.search(query=search_req.query, **params)
+        params = {k: v for k, v in search_req.model_dump().items() if v is not None and k not in ("query", "categories")}
+
+        # If category filter is specified, get matching memory IDs from SQLite first
+        category_memory_ids = None
+        if search_req.categories:
+            category_memory_ids = set(
+                await asyncio.to_thread(
+                    CATEGORY_MANAGER.get_memory_ids_by_categories, search_req.categories
+                )
+            )
+            if not category_memory_ids:
+                return {"results": [], "relations": []}
+
+        result = await MEMORY_INSTANCE.search(query=search_req.query, **params)
+
+        # Post-filter by category memory IDs
+        if category_memory_ids is not None:
+            result["results"] = [r for r in result.get("results", []) if r["id"] in category_memory_ids]
+
+        return result
     except Exception as e:
         logging.exception("Error in search_memories:")
         raise HTTPException(status_code=500, detail=str(e))
@@ -325,17 +362,18 @@ async def search_memories(search_req: SearchRequest, _api_key: Optional[str] = D
 
 @app.put("/memories/{memory_id}", summary="Update a memory")
 async def update_memory(memory_id: str, updated_memory: Dict[str, Any], _api_key: Optional[str] = Depends(verify_api_key)):
-    """Update an existing memory with new content.
-
-    Args:
-        memory_id (str): ID of the memory to update
-        updated_memory (str): New content to update the memory with
-
-    Returns:
-        dict: Success message indicating the memory was updated
-    """
+    """Update an existing memory with new content and re-categorize."""
     try:
-        return await MEMORY_INSTANCE.update(memory_id=memory_id, data=updated_memory)
+        result = await MEMORY_INSTANCE.update(memory_id=memory_id, data=updated_memory)
+        # Re-categorize the updated memory
+        new_text = updated_memory.get("data", "")
+        if new_text:
+            cat_result = await asyncio.to_thread(
+                CATEGORY_MANAGER.categorize,
+                [{"id": memory_id, "memory": new_text, "event": "UPDATE"}],
+            )
+            result["categories"] = cat_result
+        return result
     except Exception as e:
         logging.exception("Error in update_memory:")
         raise HTTPException(status_code=500, detail=str(e))
@@ -353,9 +391,10 @@ async def memory_history(memory_id: str, _api_key: Optional[str] = Depends(verif
 
 @app.delete("/memories/{memory_id}", summary="Delete a memory")
 async def delete_memory(memory_id: str, _api_key: Optional[str] = Depends(verify_api_key)):
-    """Delete a specific memory by ID."""
+    """Delete a specific memory by ID and clean up category associations."""
     try:
         await MEMORY_INSTANCE.delete(memory_id=memory_id)
+        await asyncio.to_thread(CATEGORY_MANAGER.category_db.remove_memory_categories, memory_id)
         return {"message": "Memory deleted successfully"}
     except Exception as e:
         logging.exception("Error in delete_memory:")
@@ -526,6 +565,108 @@ async def delete_user_profile(
         return {"message": "User profile deleted successfully"}
     except Exception as e:
         logging.exception("Error in delete_user_profile:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----------------------------------------------------------------
+# Category Endpoints
+# ----------------------------------------------------------------
+
+
+class CategoryCreate(BaseModel):
+    name: str = Field(..., description="Category name (lowercase).")
+    description: Optional[str] = Field(None, description="Category description.")
+
+
+@app.get("/categories", summary="List categories")
+async def list_categories(
+    limit: int = 100,
+    offset: int = 0,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """List all memory categories."""
+    try:
+        result = await asyncio.to_thread(CATEGORY_MANAGER.list_categories, limit=limit, offset=offset)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logging.exception("Error in list_categories:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/categories", summary="Create a category")
+async def create_category(
+    category_create: CategoryCreate,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Create a custom memory category."""
+    try:
+        result = await asyncio.to_thread(
+            CATEGORY_MANAGER.create_category,
+            name=category_create.name,
+            description=category_create.description,
+        )
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.exception("Error in create_category:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/categories/{category_id}", summary="Delete a category")
+async def delete_category(
+    category_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Delete a category and its memory associations."""
+    try:
+        await asyncio.to_thread(CATEGORY_MANAGER.delete_category, category_id)
+        return {"message": "Category deleted successfully"}
+    except Exception as e:
+        logging.exception("Error in delete_category:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/categories/counts", summary="Get category counts")
+async def get_category_counts(_api_key: Optional[str] = Depends(verify_api_key)):
+    """Get the number of memories in each category."""
+    try:
+        result = await asyncio.to_thread(CATEGORY_MANAGER.get_category_counts)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logging.exception("Error in get_category_counts:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/memories/{memory_id}/categories", summary="Get categories for a memory")
+async def get_memory_categories(
+    memory_id: str,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Get all categories assigned to a specific memory."""
+    try:
+        result = await asyncio.to_thread(CATEGORY_MANAGER.get_memory_categories, memory_id)
+        return JSONResponse(content={"memory_id": memory_id, "categories": result})
+    except Exception as e:
+        logging.exception("Error in get_memory_categories:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/categories/{category_name}/memories", summary="Get memories by category")
+async def get_memories_by_category(
+    category_name: str,
+    limit: int = 100,
+    offset: int = 0,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Get all memory IDs belonging to a specific category."""
+    try:
+        memory_ids = await asyncio.to_thread(
+            CATEGORY_MANAGER.get_memories_by_category, category_name, limit=limit, offset=offset
+        )
+        return JSONResponse(content={"category": category_name, "memory_ids": memory_ids, "total": len(memory_ids)})
+    except Exception as e:
+        logging.exception("Error in get_memories_by_category:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
