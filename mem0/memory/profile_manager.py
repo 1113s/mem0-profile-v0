@@ -77,6 +77,10 @@ class ProfileManager:
         """Delete a user's profile data for a given schema."""
         self.profile_db.delete_user_profile(schema_id, user_id)
 
+    def delete_all_user_profiles(self, user_id: str) -> None:
+        """Delete all profile data for a user across all schemas."""
+        self.profile_db.delete_all_user_profiles(user_id)
+
     # ----------------------------------------------------------------
     # Core: Profile Extraction
     # ----------------------------------------------------------------

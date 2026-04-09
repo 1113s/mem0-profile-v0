@@ -298,6 +298,21 @@ class ProfileSQLiteManager:
                 logger.error(f"Failed to delete user profile: {e}")
                 raise
 
+    def delete_all_user_profiles(self, user_id: str) -> None:
+        """Delete all profile data for a user across all schemas."""
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.execute(
+                    "DELETE FROM profile_data WHERE user_id = ?",
+                    (user_id,),
+                )
+                self.connection.execute("COMMIT")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"Failed to delete all user profiles: {e}")
+                raise
+
     # ----------------------------------------------------------------
     # Management
     # ----------------------------------------------------------------

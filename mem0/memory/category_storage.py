@@ -155,6 +155,37 @@ class CategorySQLiteManager:
                 logger.error(f"Failed to delete category: {e}")
                 raise
 
+    def update_category(self, category_id: str, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        """Update a category's name and/or description."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self.connection.execute(
+                "SELECT id, name, description, created_at, updated_at FROM categories WHERE id = ?",
+                (category_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"Category '{category_id}' not found.")
+
+            new_name = name.strip().lower() if name is not None else row[1]
+            new_description = description if description is not None else row[2]
+
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.execute(
+                    "UPDATE categories SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+                    (new_name, new_description, now, category_id),
+                )
+                self.connection.execute("COMMIT")
+            except sqlite3.IntegrityError:
+                self.connection.execute("ROLLBACK")
+                raise ValueError(f"Category '{new_name}' already exists.")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"Failed to update category: {e}")
+                raise
+        return {"id": category_id, "name": new_name, "description": new_description, "created_at": row[3], "updated_at": now}
+
     # ----------------------------------------------------------------
     # Memory-Category Associations
     # ----------------------------------------------------------------
@@ -202,6 +233,24 @@ class CategorySQLiteManager:
             except Exception as e:
                 self.connection.execute("ROLLBACK")
                 logger.error(f"Failed to remove memory categories: {e}")
+                raise
+
+    def remove_memory_categories_batch(self, memory_ids: List[str]) -> None:
+        """Remove category associations for multiple memories at once."""
+        if not memory_ids:
+            return
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN")
+                placeholders = ",".join("?" for _ in memory_ids)
+                self.connection.execute(
+                    f"DELETE FROM memory_categories WHERE memory_id IN ({placeholders})",
+                    memory_ids,
+                )
+                self.connection.execute("COMMIT")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"Failed to batch remove memory categories: {e}")
                 raise
 
     def get_categories_for_memory(self, memory_id: str) -> List[str]:

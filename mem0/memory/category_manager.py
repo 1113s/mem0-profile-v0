@@ -41,6 +41,9 @@ class CategoryManager:
     def delete_category(self, category_id: str) -> None:
         self.category_db.delete_category(category_id)
 
+    def update_category(self, category_id: str, name: Optional[str] = None, description: Optional[str] = None) -> dict:
+        return self.category_db.update_category(category_id, name=name, description=description)
+
     def get_memory_categories(self, memory_id: str) -> List[str]:
         return self.category_db.get_categories_for_memory(memory_id)
 
@@ -145,6 +148,7 @@ class CategoryManager:
 
     def reset(self) -> None:
         self.category_db.reset()
+        self.category_db.seed_default_categories()
 
     def close(self) -> None:
         self.category_db.close()

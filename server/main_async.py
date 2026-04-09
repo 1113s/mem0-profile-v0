@@ -154,7 +154,9 @@ async def lifespan(app: FastAPI):
     )
     logging.info("AsyncMemory, ProfileManager and CategoryManager initialized successfully.")
     yield
-    MEMORY_INSTANCE = None
+    if MEMORY_INSTANCE:
+        MEMORY_INSTANCE.close()
+        MEMORY_INSTANCE = None
     if PROFILE_MANAGER:
         PROFILE_MANAGER.close()
         PROFILE_MANAGER = None
@@ -415,7 +417,19 @@ async def delete_all_memories(
         params = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
         }
+
+        # Fetch memory IDs before deletion for category cleanup
+        all_mems = await MEMORY_INSTANCE.get_all(**params, limit=10000)
+        memory_ids = [m["id"] for m in all_mems.get("results", [])]
+
         await MEMORY_INSTANCE.delete_all(**params)
+
+        # Clean up category associations
+        if memory_ids:
+            await asyncio.to_thread(
+                CATEGORY_MANAGER.category_db.remove_memory_categories_batch, memory_ids
+            )
+
         return {"message": "All relevant memories deleted"}
     except Exception as e:
         logging.exception("Error in delete_all_memories:")
@@ -427,7 +441,9 @@ async def reset_memory(_api_key: Optional[str] = Depends(verify_api_key)):
     """Completely reset stored memories."""
     try:
         await MEMORY_INSTANCE.reset()
-        return {"message": "All memories reset"}
+        await asyncio.to_thread(PROFILE_MANAGER.reset)
+        await asyncio.to_thread(CATEGORY_MANAGER.reset)
+        return {"message": "All memories, profiles, and categories reset"}
     except Exception as e:
         logging.exception("Error in reset_memory:")
         raise HTTPException(status_code=500, detail=str(e))
@@ -578,6 +594,11 @@ class CategoryCreate(BaseModel):
     description: Optional[str] = Field(None, description="Category description.")
 
 
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="New category name (lowercase).")
+    description: Optional[str] = Field(None, description="New category description.")
+
+
 @app.get("/categories", summary="List categories")
 async def list_categories(
     limit: int = 100,
@@ -610,6 +631,28 @@ async def create_category(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logging.exception("Error in create_category:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/categories/{category_id}", summary="Update a category")
+async def update_category(
+    category_id: str,
+    category_update: CategoryUpdate,
+    _api_key: Optional[str] = Depends(verify_api_key),
+):
+    """Update a category's name and/or description."""
+    try:
+        result = await asyncio.to_thread(
+            CATEGORY_MANAGER.update_category,
+            category_id=category_id,
+            name=category_update.name,
+            description=category_update.description,
+        )
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.exception("Error in update_category:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
